@@ -225,7 +225,7 @@ if __name__ == '__main__':
             first_ref=first_ref,
             second_ref=second_ref,
             cfg_scale=args.cfg_scale,
-            num_inference_steps=6,
+            num_inference_steps=50,
             num_frames=81,
             seed=0, tiled=True
         )
