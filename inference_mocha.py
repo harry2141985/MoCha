@@ -15,57 +15,62 @@ import json
 
 class VideoRefDataset(torch.utils.data.Dataset):
     def __init__(self, data_path, args, max_num_frames=161, frame_interval=1, num_frames=161, height=480, width=832):
+        self.base_path = os.path.dirname(data_path)  # Prepend CSV folder path
         metadata = pd.read_csv(data_path)
-        self.video_path = metadata["source_video"]
-        self.mask_path = metadata["source_mask"]
-        self.ref_path_1 = metadata["reference_1"]
+
+        # Prepend base path to all relative paths
+        self.video_path = [os.path.join(self.base_path, p) for p in metadata["source_video"]]
+        self.mask_path = [os.path.join(self.base_path, p) for p in metadata["source_mask"]]
+        self.ref_path_1 = [os.path.join(self.base_path, p) for p in metadata["reference_1"]]
+
         self.ref_path_2 = []
         for ref_name in metadata["reference_2"]:
             if pd.isna(ref_name) or ref_name == 'None':
                 self.ref_path_2.append("None")
             else:
-                self.ref_path_2.append(ref_name)
-        
+                self.ref_path_2.append(os.path.join(self.base_path, ref_name))
+
         self.max_num_frames = max_num_frames
         self.frame_interval = frame_interval
         self.num_frames = num_frames
         self.height = height
         self.width = width
         self.args = args
-            
+
+        # Updated transforms to remove deprecated warning
         self.frame_process = v2.Compose([
             v2.CenterCrop(size=(height, width)),
             v2.Resize(size=(height, width), antialias=True),
-            v2.ToTensor(),
+            v2.ToImage(),
+            v2.ToDtype(torch.float32, scale=True),
             v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ])
 
         self.mask_process = v2.Compose([
             v2.CenterCrop(size=(height // 8, width // 8)),
             v2.Resize(size=(height // 8, width // 8), antialias=True),
-            v2.ToTensor(),
+            v2.ToImage(),
+            v2.ToDtype(torch.float32, scale=True),
             v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ])
-        
-        
-    def crop_and_resize(self, image, isMask = False):
+
+    def crop_and_resize(self, image, isMask=False):
         width, height = image.size
         scale = max(self.width / width, self.height / height)
         if isMask:
             scale /= 8
         image = torchvision.transforms.functional.resize(
             image,
-            (round(height*scale), round(width*scale)),
+            (round(height * scale), round(width * scale)),
             interpolation=torchvision.transforms.InterpolationMode.BILINEAR
         )
         return image
 
-
     def load_frames_using_imageio(self, file_path, max_num_frames, start_frame_id, interval, num_frames, frame_process):
         reader = imageio.get_reader(file_path)
         if reader.count_frames() < max_num_frames or reader.count_frames() - 1 < start_frame_id + (num_frames - 1) * interval:
-            num_frames = 1 + (reader.count_frames() - 1) //4 * 4
-        
+            num_frames = 1 + (reader.count_frames() - 1) // 4 * 4
+
         frames = []
         first_frame = None
         for frame_id in range(num_frames):
@@ -83,12 +88,9 @@ class VideoRefDataset(torch.utils.data.Dataset):
 
         return frames
 
-
     def is_image(self, file_path):
         file_ext_name = file_path.split(".")[-1]
-        if file_ext_name.lower() in ["jpg", "jpeg", "png", "webp"]:
-            return True
-        return False
+        return file_ext_name.lower() in ["jpg", "jpeg", "png", "webp"]
 
     def load_image_frame(self, file_path, isMask=False):
         image = Image.open(file_path).convert('RGB')
@@ -99,14 +101,10 @@ class VideoRefDataset(torch.utils.data.Dataset):
             image = self.frame_process(image)
         image = image.unsqueeze(1)
         return image
-    
-    def load_video(self, file_path, isMask = False):
-        if self.is_image(file_path):
-            if isMask:
-                return self.load_image_frame(file_path, isMask=True)
-            else:
-                return self.load_image_frame(file_path)
 
+    def load_video(self, file_path, isMask=False):
+        if self.is_image(file_path):
+            return self.load_image_frame(file_path, isMask=isMask)
         frames = self.load_frames_using_imageio(file_path, self.max_num_frames, 0, self.frame_interval, self.num_frames, self.frame_process)
         return frames
 
@@ -132,12 +130,11 @@ class VideoRefDataset(torch.utils.data.Dataset):
             second_ref = self.load_video(ref_path_2)
 
         data = {"video": video, "video_path": video_path, "mask": mask_cond, "first_ref": first_ref, "second_ref": second_ref}
-
         return data
-    
 
     def __len__(self):
         return len(self.video_path)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="MoCha Inference Code")
@@ -150,7 +147,7 @@ def parse_args():
     parser.add_argument(
         "--ckpt_path",
         type=str,
-        default="./checkpoints/step18500.ckpt",
+        default="/root/MoCha/checkpoints/preview/step18500.ckpt",
         help="Path to save the model.",
     )
     parser.add_argument(
@@ -173,15 +170,21 @@ def parse_args():
     args = parser.parse_args()
     return args
 
+
 if __name__ == '__main__':
     args = parse_args()
 
     # Load Wan2.1 pre-trained models
     model_manager = ModelManager(torch_dtype=torch.bfloat16, device="cpu")
     model_manager.load_models([
-        ["/path/to/diffusion_pytorch_model-00001-of-00006.safetensors", "/path/to/diffusion_pytorch_model-00002-of-00006.safetensors", "/path/to/diffusion_pytorch_model-00003-of-00006.safetensors", "/path/to/diffusion_pytorch_model-00004-of-00006.safetensors", "/path/to/diffusion_pytorch_model-00005-of-00006.safetensors", "/path/to/diffusion_pytorch_model-00006-of-00006.safetensors"],
-        "/path/to/Wan2.1-T2V-14B/models_t5_umt5-xxl-enc-bf16.pth",
-        "/path/to/Wan2.1-T2V-14B/Wan2.1_VAE.pth",
+        ["/root/MoCha/checkpoints/diffusion_pytorch_model-00001-of-00006.safetensors",
+         "/root/MoCha/checkpoints/diffusion_pytorch_model-00002-of-00006.safetensors",
+         "/root/MoCha/checkpoints/diffusion_pytorch_model-00003-of-00006.safetensors",
+         "/root/MoCha/checkpoints/diffusion_pytorch_model-00004-of-00006.safetensors",
+         "/root/MoCha/checkpoints/diffusion_pytorch_model-00005-of-00006.safetensors",
+         "/root/MoCha/checkpoints/diffusion_pytorch_model-00006-of-00006.safetensors"],
+        "/root/MoCha/checkpoints/models_t5_umt5-xxl-enc-bf16.pth",
+        "/root/MoCha/checkpoints/Wan2.1_VAE.pth",
     ])
     pipe = WanVideoMoChaPipeline.from_model_manager(model_manager, device="cuda")
 
@@ -195,7 +198,7 @@ if __name__ == '__main__':
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    # Prepare Dataset (Source video, Mask, Reference Image)
+    # Prepare Dataset
     dataset = VideoRefDataset(
         args.data_path,
         args,
@@ -227,7 +230,8 @@ if __name__ == '__main__':
             cfg_scale=args.cfg_scale,
             num_inference_steps=50,
             num_frames=81,
-            seed=0, tiled=True
+            seed=0,
+            tiled=True
         )
 
         save_video(video, os.path.join(output_dir, f"{os.path.splitext(cond_path_name)[0]}_replaced.mp4"), fps=30, quality=5)
